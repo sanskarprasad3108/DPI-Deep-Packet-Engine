@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DPI_ENGINE_PATH=/app/build/dpi_engine
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends cmake g++ \
+    && apt-get install -y --no-install-recommends build-essential cmake \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
