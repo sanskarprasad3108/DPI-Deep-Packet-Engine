@@ -41,6 +41,18 @@ class ReplayRequest(BaseModel):
     speed: Optional[float] = 1.0
 
 
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "DPI Deep Packet Engine API",
+        "version": "2.0.0",
+        "docs_url": "/docs",
+        "health_check": "/api/health",
+        "engine_status": "/api/engine/status"
+    }
+
+
 @app.get("/api/health")
 async def health_check():
     return {
