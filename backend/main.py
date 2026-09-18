@@ -4,9 +4,13 @@ import shutil
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .engine_manager import engine_manager, WORKSPACE_ROOT
+
+FRONTEND_DIST = os.path.join(WORKSPACE_ROOT, "frontend", "dist")
 
 app = FastAPI(
     title="DPI Engine Telemetry & Control API",
@@ -43,6 +47,9 @@ class ReplayRequest(BaseModel):
 
 @app.get("/")
 async def root():
+    index_file = os.path.join(FRONTEND_DIST, "index.html")
+    if os.path.exists(index_file):
+        return FileResponse(index_file)
     return {
         "status": "online",
         "service": "DPI Deep Packet Engine API",
@@ -336,3 +343,24 @@ async def websocket_telemetry_endpoint(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+
+
+if os.path.exists(FRONTEND_DIST):
+    assets_dir = os.path.join(FRONTEND_DIST, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+
+@app.get("/{full_path:path}")
+async def serve_frontend_spa(full_path: str):
+    if full_path.startswith(("api", "ws", "docs", "redoc", "openapi.json")):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    file_path = os.path.join(FRONTEND_DIST, full_path)
+    if full_path and os.path.isfile(file_path):
+        return FileResponse(file_path)
+
+    index_file = os.path.join(FRONTEND_DIST, "index.html")
+    if os.path.exists(index_file):
+        return FileResponse(index_file)
+    raise HTTPException(status_code=404, detail="Not Found")
