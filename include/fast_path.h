@@ -52,6 +52,7 @@ public:
     
     // Get input queue (for LB to push packets)
     ThreadSafeQueue<PacketJob>& getInputQueue() { return input_queue_; }
+    size_t getQueueDepth() const { return input_queue_.size(); }
     
     // Get connection tracker (for reporting)
     ConnectionTracker& getConnectionTracker() { return conn_tracker_; }

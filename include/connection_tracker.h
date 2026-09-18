@@ -4,6 +4,7 @@
 #include "types.h"
 #include <unordered_map>
 #include <shared_mutex>
+#include <mutex>
 #include <vector>
 #include <chrono>
 #include <functional>
@@ -72,6 +73,7 @@ public:
     
     // Iteration callback for all connections
     void forEach(std::function<void(const Connection&)> callback) const;
+    std::recursive_mutex& getMutex() const { return mutex_; }
 
 private:
     int fp_id_;
@@ -80,6 +82,7 @@ private:
     // Connection table
     // Note: FiveTuple hash ensures consistent mapping, so we don't need
     // to handle bidirectional flows specially here
+    mutable std::recursive_mutex mutex_;
     std::unordered_map<FiveTuple, Connection, FiveTupleHash> connections_;
     
     // Statistics

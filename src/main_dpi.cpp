@@ -2,6 +2,8 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <thread>
+#include <atomic>
 #include "dpi_engine.h"
 
 using namespace DPI;
@@ -9,55 +11,37 @@ using namespace DPI;
 void printUsage(const char* program) {
     std::cout << R"(
 ╔══════════════════════════════════════════════════════════════╗
-║                    DPI ENGINE v1.0                            ║
+║                    DPI ENGINE v2.0                            ║
 ║               Deep Packet Inspection System                   ║
 ╚══════════════════════════════════════════════════════════════╝
 
 Usage: )" << program << R"( <input.pcap> <output.pcap> [options]
 
 Arguments:
-  input.pcap     Input PCAP file (captured user traffic)
-  output.pcap    Output PCAP file (filtered traffic to internet)
+  input.pcap            Input PCAP file (captured user traffic)
+  output.pcap           Output PCAP file (filtered traffic to internet)
 
 Options:
-  --block-ip <ip>        Block packets from source IP
-  --block-app <app>      Block application (e.g., YouTube, Facebook)
-  --block-domain <dom>   Block domain (supports wildcards: *.facebook.com)
-  --rules <file>         Load blocking rules from file
-  --lbs <n>              Number of load balancer threads (default: 2)
-  --fps <n>              FP threads per LB (default: 2)
-  --verbose              Enable verbose output
+  --block-ip <ip>       Block packets from source IP
+  --block-app <app>     Block application (e.g., YouTube, Facebook)
+  --block-domain <dom>  Block domain (supports wildcards: *.facebook.com)
+  --rules <file>        Load blocking rules from file
+  --lbs <n>             Number of load balancer threads (default: 2)
+  --fps <n>             FP threads per LB (default: 2)
+  --telemetry-json      Output structured JSON telemetry for monitoring adapter
+  --pacing-us <n>       Pacing delay in microseconds between packets
+  --interactive         Listen on stdin for dynamic runtime commands
+  --verbose             Enable verbose output
 
 Examples:
   )" << program << R"( capture.pcap filtered.pcap
   )" << program << R"( capture.pcap filtered.pcap --block-app YouTube
-  )" << program << R"( capture.pcap filtered.pcap --block-ip 192.168.1.50 --block-domain *.tiktok.com
-  )" << program << R"( capture.pcap filtered.pcap --rules blocking_rules.txt
+  )" << program << R"( capture.pcap filtered.pcap --telemetry-json
+  )" << program << R"( capture.pcap filtered.pcap --telemetry-json --pacing-us 500
 
 Supported Apps for Blocking:
-  Google, YouTube, Facebook, Instagram, Twitter/X, Netflix, Amazon,
-  Microsoft, Apple, WhatsApp, Telegram, TikTok, Spotify, Zoom, Discord, GitHub
-
-Architecture:
-  ┌─────────────┐
-  │ PCAP Reader │  Reads packets from input file
-  └──────┬──────┘
-         │ hash(5-tuple) % num_lbs
-         ▼
-  ┌──────┴──────┐
-  │ Load Balancer │  2 LB threads distribute to FPs
-  │   LB0 │ LB1   │
-  └──┬────┴────┬──┘
-     │         │  hash(5-tuple) % fps_per_lb
-     ▼         ▼
-  ┌──┴──┐   ┌──┴──┐
-  │FP0-1│   │FP2-3│  4 FP threads: DPI, classification, blocking
-  └──┬──┘   └──┬──┘
-     │         │
-     ▼         ▼
-  ┌──┴─────────┴──┐
-  │ Output Writer │  Writes forwarded packets to output
-  └───────────────┘
+  Google, YouTube, Facebook, Instagram, Twitter, Netflix, Amazon,
+  Microsoft, Apple, WhatsApp, Telegram, TikTok, Spotify, Zoom, Discord, GitHub, Cloudflare
 
 )";
 }
@@ -85,11 +69,14 @@ int main(int argc, char* argv[]) {
     DPIEngine::Config config;
     config.num_load_balancers = 2;
     config.fps_per_lb = 2;
+    config.json_telemetry = false;
+    config.pacing_us = 0;
     
     std::vector<std::string> block_ips;
     std::vector<std::string> block_apps;
     std::vector<std::string> block_domains;
     std::string rules_file;
+    bool interactive = false;
     
     for (int i = 3; i < argc; i++) {
         std::string arg = argv[i];
@@ -106,6 +93,12 @@ int main(int argc, char* argv[]) {
             config.num_load_balancers = std::stoi(argv[++i]);
         } else if (arg == "--fps" && i + 1 < argc) {
             config.fps_per_lb = std::stoi(argv[++i]);
+        } else if (arg == "--telemetry-json") {
+            config.json_telemetry = true;
+        } else if (arg == "--pacing-us" && i + 1 < argc) {
+            config.pacing_us = std::stoi(argv[++i]);
+        } else if (arg == "--interactive") {
+            interactive = true;
         } else if (arg == "--verbose") {
             config.verbose = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -141,14 +134,55 @@ int main(int argc, char* argv[]) {
         engine.blockDomain(domain);
     }
     
+    // Stdin interactive listener thread
+    std::atomic<bool> stop_interactive{false};
+    std::thread stdin_thread;
+    if (interactive) {
+        stdin_thread = std::thread([&]() {
+            std::string line;
+            while (!stop_interactive && std::getline(std::cin, line)) {
+                if (line.empty()) continue;
+                auto parts = split(line);
+                if (parts.empty()) continue;
+                
+                std::string cmd = parts[0];
+                if (cmd == "BLOCK_IP" && parts.size() > 1) {
+                    engine.blockIP(parts[1]);
+                } else if (cmd == "UNBLOCK_IP" && parts.size() > 1) {
+                    engine.unblockIP(parts[1]);
+                } else if (cmd == "BLOCK_APP" && parts.size() > 1) {
+                    engine.blockApp(parts[1]);
+                } else if (cmd == "UNBLOCK_APP" && parts.size() > 1) {
+                    engine.unblockApp(parts[1]);
+                } else if (cmd == "BLOCK_DOMAIN" && parts.size() > 1) {
+                    engine.blockDomain(parts[1]);
+                } else if (cmd == "UNBLOCK_DOMAIN" && parts.size() > 1) {
+                    engine.unblockDomain(parts[1]);
+                } else if (cmd == "STOP" || cmd == "QUIT") {
+                    engine.stop();
+                    break;
+                }
+            }
+        });
+    }
+    
     // Process the file
     if (!engine.processFile(input_file, output_file)) {
         std::cerr << "Failed to process file\n";
+        stop_interactive = true;
+        if (stdin_thread.joinable()) stdin_thread.detach();
         return 1;
     }
     
-    std::cout << "\nProcessing complete!\n";
-    std::cout << "Output written to: " << output_file << "\n";
+    stop_interactive = true;
+    if (stdin_thread.joinable()) {
+        stdin_thread.detach();
+    }
+    
+    if (!config.json_telemetry) {
+        std::cout << "\nProcessing complete!\n";
+        std::cout << "Output written to: " << output_file << "\n";
+    }
     
     return 0;
 }

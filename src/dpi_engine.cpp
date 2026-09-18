@@ -1,9 +1,11 @@
 #include "dpi_engine.h"
+#include "telemetry_collector.h"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
 #include <chrono>
 #include <cstring>
+#include <algorithm>
 
 namespace DPI {
 
@@ -14,16 +16,22 @@ namespace DPI {
 DPIEngine::DPIEngine(const Config& config)
     : config_(config), output_queue_(10000) {
     
-    std::cout << "\n";
-    std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║                    DPI ENGINE v1.0                            ║\n";
-    std::cout << "║               Deep Packet Inspection System                   ║\n";
-    std::cout << "╠══════════════════════════════════════════════════════════════╣\n";
-    std::cout << "║ Configuration:                                                ║\n";
-    std::cout << "║   Load Balancers:    " << std::setw(3) << config.num_load_balancers << "                                       ║\n";
-    std::cout << "║   FPs per LB:        " << std::setw(3) << config.fps_per_lb << "                                       ║\n";
-    std::cout << "║   Total FP threads:  " << std::setw(3) << (config.num_load_balancers * config.fps_per_lb) << "                                       ║\n";
-    std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+    if (config.json_telemetry) {
+        TelemetryCollector::getInstance().setJsonTelemetry(true);
+    }
+    
+    if (!config.json_telemetry) {
+        std::cout << "\n";
+        std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
+        std::cout << "║                    DPI ENGINE v2.0                            ║\n";
+        std::cout << "║               Deep Packet Inspection System                   ║\n";
+        std::cout << "╠══════════════════════════════════════════════════════════════╣\n";
+        std::cout << "║ Configuration:                                                ║\n";
+        std::cout << "║   Load Balancers:    " << std::setw(3) << config.num_load_balancers << "                                       ║\n";
+        std::cout << "║   FPs per LB:        " << std::setw(3) << config.fps_per_lb << "                                       ║\n";
+        std::cout << "║   Total FP threads:  " << std::setw(3) << (config.num_load_balancers * config.fps_per_lb) << "                                       ║\n";
+        std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+    }
 }
 
 DPIEngine::~DPIEngine() {
@@ -61,7 +69,9 @@ bool DPIEngine::initialize() {
         global_conn_table_->registerTracker(i, &fp_manager_->getFP(i).getConnectionTracker());
     }
     
-    std::cout << "[DPIEngine] Initialized successfully\n";
+    if (!config_.json_telemetry) {
+        std::cout << "[DPIEngine] Initialized successfully\n";
+    }
     return true;
 }
 
@@ -80,13 +90,23 @@ void DPIEngine::start() {
     // Start LB threads
     lb_manager_->startAll();
     
-    std::cout << "[DPIEngine] All threads started\n";
+    // Start periodic telemetry emitter thread
+    telemetry_thread_ = std::thread(&DPIEngine::telemetryThreadFunc, this);
+    
+    if (!config_.json_telemetry) {
+        std::cout << "[DPIEngine] All threads started\n";
+    }
 }
 
 void DPIEngine::stop() {
     if (!running_) return;
     
     running_ = false;
+    
+    // Stop telemetry thread
+    if (telemetry_thread_.joinable()) {
+        telemetry_thread_.join();
+    }
     
     // Stop LB threads first (they feed FPs)
     if (lb_manager_) {
@@ -104,27 +124,74 @@ void DPIEngine::stop() {
         output_thread_.join();
     }
     
-    std::cout << "[DPIEngine] All threads stopped\n";
+    // Final stats emit
+    emitLiveStats();
+    
+    TelemetryCollector::getInstance().emitEngineStopped(
+        stats_.total_packets.load(),
+        stats_.forwarded_packets.load(),
+        stats_.dropped_packets.load()
+    );
+    
+    if (!config_.json_telemetry) {
+        std::cout << "[DPIEngine] All threads stopped\n";
+    }
 }
 
 void DPIEngine::waitForCompletion() {
-    // Wait for reader to finish
+    // Wait for reader to finish reading PCAP
     if (reader_thread_.joinable()) {
         reader_thread_.join();
     }
     
-    // Wait a bit for queues to drain
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    // Wait until all LB queues, FP queues, and output queue are completely drained
+    auto start_wait = std::chrono::steady_clock::now();
+    while (running_) {
+        bool all_empty = true;
+        if (lb_manager_) {
+            for (int i = 0; i < lb_manager_->getNumLBs(); i++) {
+                if (lb_manager_->getLB(i).getInputQueue().size() > 0) {
+                    all_empty = false;
+                    break;
+                }
+            }
+        }
+        if (fp_manager_ && all_empty) {
+            for (int i = 0; i < fp_manager_->getNumFPs(); i++) {
+                if (fp_manager_->getFP(i).getInputQueue().size() > 0) {
+                    all_empty = false;
+                    break;
+                }
+            }
+        }
+        if (output_queue_.size() > 0) {
+            all_empty = false;
+        }
+        
+        if (all_empty) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (output_queue_.size() == 0) {
+                break;
+            }
+        }
+        
+        if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_wait).count() > 10) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     
-    // Signal completion
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     processing_complete_ = true;
 }
 
 bool DPIEngine::processFile(const std::string& input_file,
                             const std::string& output_file) {
     
-    std::cout << "\n[DPIEngine] Processing: " << input_file << "\n";
-    std::cout << "[DPIEngine] Output to:  " << output_file << "\n\n";
+    if (!config_.json_telemetry) {
+        std::cout << "\n[DPIEngine] Processing: " << input_file << "\n";
+        std::cout << "[DPIEngine] Output to:  " << output_file << "\n\n";
+    }
     
     // Initialize if not already done
     if (!rule_manager_) {
@@ -136,9 +203,16 @@ bool DPIEngine::processFile(const std::string& input_file,
     // Open output file
     output_file_.open(output_file, std::ios::binary);
     if (!output_file_.is_open()) {
-        std::cerr << "[DPIEngine] Error: Cannot open output file\n";
+        std::cerr << "[DPIEngine] Error: Cannot open output file: " << output_file << "\n";
         return false;
     }
+    
+    // Emit ENGINE_STARTED event
+    TelemetryCollector::getInstance().emitEngineStarted(
+        input_file,
+        config_.num_load_balancers,
+        config_.fps_per_lb
+    );
     
     // Start processing threads
     start();
@@ -160,9 +234,11 @@ bool DPIEngine::processFile(const std::string& input_file,
         output_file_.close();
     }
     
-    // Print final report
-    std::cout << generateReport();
-    std::cout << fp_manager_->generateClassificationReport();
+    if (!config_.json_telemetry) {
+        // Print final report
+        std::cout << generateReport();
+        std::cout << fp_manager_->generateClassificationReport();
+    }
     
     return true;
 }
@@ -171,7 +247,7 @@ void DPIEngine::readerThreadFunc(const std::string& input_file) {
     PacketAnalyzer::PcapReader reader;
     
     if (!reader.open(input_file)) {
-        std::cerr << "[Reader] Error: Cannot open input file\n";
+        std::cerr << "[Reader] Error: Cannot open input file: " << input_file << "\n";
         return;
     }
     
@@ -182,9 +258,11 @@ void DPIEngine::readerThreadFunc(const std::string& input_file) {
     PacketAnalyzer::ParsedPacket parsed;
     uint32_t packet_id = 0;
     
-    std::cout << "[Reader] Starting packet processing...\n";
+    if (!config_.json_telemetry) {
+        std::cout << "[Reader] Starting packet processing...\n";
+    }
     
-    while (reader.readNextPacket(raw)) {
+    while (running_ && reader.readNextPacket(raw)) {
         // Parse the packet
         if (!PacketAnalyzer::PacketParser::parse(raw, parsed)) {
             continue;  // Skip unparseable packets
@@ -206,15 +284,116 @@ void DPIEngine::readerThreadFunc(const std::string& input_file) {
             stats_.tcp_packets++;
         } else if (parsed.has_udp) {
             stats_.udp_packets++;
+        } else {
+            stats_.other_packets++;
         }
         
         // Send to appropriate LB based on hash
         LoadBalancer& lb = lb_manager_->getLBForPacket(job.tuple);
         lb.getInputQueue().push(std::move(job));
+        
+        // If simulated pacing requested (e.g. for live dashboard visualization)
+        if (config_.pacing_us > 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(config_.pacing_us));
+        }
     }
     
-    std::cout << "[Reader] Finished reading " << packet_id << " packets\n";
+    if (!config_.json_telemetry) {
+        std::cout << "[Reader] Finished reading " << packet_id << " packets\n";
+    }
     reader.close();
+}
+
+std::vector<ThreadTelemetry> DPIEngine::getThreadTelemetry() const {
+    std::vector<ThreadTelemetry> result;
+    
+    // Reader thread
+    ThreadTelemetry r;
+    r.thread_type = "READER";
+    r.thread_id = 0;
+    r.packets_processed = stats_.total_packets.load();
+    r.packets_forwarded = stats_.total_packets.load();
+    r.packets_dropped = 0;
+    r.queue_depth = 0;
+    r.utilization = 1.0;
+    result.push_back(r);
+    
+    // LB threads
+    if (lb_manager_) {
+        for (int i = 0; i < lb_manager_->getNumLBs(); i++) {
+            auto& lb = lb_manager_->getLB(i);
+            auto lb_stat = lb.getStats();
+            ThreadTelemetry t;
+            t.thread_type = "LB";
+            t.thread_id = i;
+            t.packets_processed = lb_stat.packets_received;
+            t.packets_forwarded = lb_stat.packets_dispatched;
+            t.packets_dropped = 0;
+            t.queue_depth = lb.getQueueDepth();
+            t.utilization = (stats_.total_packets > 0) ? 
+                (static_cast<double>(lb_stat.packets_received) / stats_.total_packets.load()) : 0.0;
+            result.push_back(t);
+        }
+    }
+    
+    // FP threads
+    if (fp_manager_) {
+        for (int i = 0; i < fp_manager_->getNumFPs(); i++) {
+            auto& fp = fp_manager_->getFP(i);
+            auto fp_stat = fp.getStats();
+            ThreadTelemetry t;
+            t.thread_type = "FP";
+            t.thread_id = i;
+            t.packets_processed = fp_stat.packets_processed;
+            t.packets_forwarded = fp_stat.packets_forwarded;
+            t.packets_dropped = fp_stat.packets_dropped;
+            t.queue_depth = fp.getQueueDepth();
+            t.utilization = (stats_.total_packets > 0) ? 
+                (static_cast<double>(fp_stat.packets_processed) / stats_.total_packets.load()) : 0.0;
+            result.push_back(t);
+        }
+    }
+    
+    // Writer thread
+    ThreadTelemetry w;
+    w.thread_type = "WRITER";
+    w.thread_id = 0;
+    w.packets_processed = stats_.forwarded_packets.load();
+    w.packets_forwarded = stats_.forwarded_packets.load();
+    w.packets_dropped = 0;
+    w.queue_depth = output_queue_.size();
+    w.utilization = (stats_.total_packets > 0) ? 
+        (static_cast<double>(stats_.forwarded_packets.load()) / stats_.total_packets.load()) : 0.0;
+    result.push_back(w);
+    
+    return result;
+}
+
+void DPIEngine::emitLiveStats() {
+    size_t active_flows = 0;
+    if (global_conn_table_) {
+        active_flows = global_conn_table_->getGlobalStats().total_active_connections;
+    }
+    
+    TelemetryCollector::getInstance().emitStatsUpdate(
+        stats_.total_packets.load(),
+        stats_.total_bytes.load(),
+        stats_.forwarded_packets.load(),
+        stats_.dropped_packets.load(),
+        stats_.tcp_packets.load(),
+        stats_.udp_packets.load(),
+        stats_.other_packets.load(),
+        active_flows
+    );
+    
+    TelemetryCollector::getInstance().emitThreadStats(getThreadTelemetry());
+}
+
+void DPIEngine::telemetryThreadFunc() {
+    while (running_) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        emitLiveStats();
+    }
 }
 
 PacketJob DPIEngine::createPacketJob(const PacketAnalyzer::RawPacket& raw,
@@ -260,23 +439,26 @@ PacketJob DPIEngine::createPacketJob(const PacketAnalyzer::RawPacket& raw,
     job.ip_offset = 14;  // Ethernet header is 14 bytes
     
     // IP header length
-    if (job.data.size() > 14) {
+    if (job.data.size() >= 34) {  // 14 Eth + 20 IP
         uint8_t ip_ihl = job.data[14] & 0x0F;
         size_t ip_header_len = ip_ihl * 4;
         job.transport_offset = 14 + ip_header_len;
         
         // Transport header length
-        if (parsed.has_tcp && job.data.size() > job.transport_offset) {
+        if (parsed.has_tcp && job.data.size() >= job.transport_offset + 20) {
             uint8_t tcp_data_offset = (job.data[job.transport_offset + 12] >> 4) & 0x0F;
             size_t tcp_header_len = tcp_data_offset * 4;
             job.payload_offset = job.transport_offset + tcp_header_len;
-        } else if (parsed.has_udp) {
+        } else if (parsed.has_udp && job.data.size() >= job.transport_offset + 8) {
             job.payload_offset = job.transport_offset + 8;  // UDP header is 8 bytes
         }
         
-        if (job.payload_offset < job.data.size()) {
+        if (job.payload_offset > 0 && job.payload_offset < job.data.size()) {
             job.payload_length = job.data.size() - job.payload_offset;
             job.payload_data = job.data.data() + job.payload_offset;
+        } else {
+            job.payload_length = 0;
+            job.payload_data = nullptr;
         }
     }
     
@@ -357,7 +539,9 @@ void DPIEngine::blockApp(const std::string& app_name) {
             return;
         }
     }
-    std::cerr << "[DPIEngine] Unknown app: " << app_name << "\n";
+    if (!config_.json_telemetry) {
+        std::cerr << "[DPIEngine] Unknown app: " << app_name << "\n";
+    }
 }
 
 void DPIEngine::unblockApp(AppType app) {

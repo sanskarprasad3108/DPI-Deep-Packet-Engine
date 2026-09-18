@@ -1,5 +1,15 @@
 # DPI Engine - Deep Packet Inspection System
 
+## Deploying on Render
+
+The repository includes a `render.yaml` Blueprint for the API and frontend.
+
+1. Push the repository to GitHub and create a new Render Blueprint from it.
+2. Render creates `dpi-api` (Docker + FastAPI + native DPI engine) and `dpi-frontend` (static Vite site).
+3. If the API service name is changed, update `VITE_API_URL` on `dpi-frontend` to the API service's HTTPS URL, then redeploy the frontend.
+
+The API health endpoint is `/api/health`. The frontend uses the same API URL for REST requests and its telemetry WebSocket.
+
 
 This document explains **everything** about this project - from basic networking concepts to the complete code architecture. After reading this, you should understand exactly how packets flow through the system without needing to read the code.
 
@@ -1032,22 +1042,70 @@ python3 generate_test_pcap.py
 
 ---
 
+---
+
+## 12. Real-Time DPI Monitoring Dashboard & Control Center
+
+A modern, production-style Network Security / Traffic Intelligence Control Center built around the C++ multi-threaded DPI Engine.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 C++17 Multi-Threaded Engine                 │
+│      [PCAP Reader] ➔ [2x LB Ring] ➔ [4x FP Workers]         │
+│          └─ TelemetryCollector (Structured JSON IPC) ─┘     │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ stdout / stdin JSON Stream
+┌──────────────────────────────▼──────────────────────────────┐
+│                    FastAPI Backend Adapter                  │
+│       - Subprocess Engine Manager & Sliding Windows         │
+│       - REST Endpoints (/api/stats, /api/flows, etc.)       │
+│       - WebSocket Live Stream (/ws/telemetry)               │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ WebSocket / REST
+┌──────────────────────────────▼──────────────────────────────┐
+│              React + Vite + Tailwind Control Center         │
+│  - KPI Telemetry Cards & Live Traffic Timeline (PPS, BPS)   │
+│  - Virtualized Active Flows Table & Search Multi-filters    │
+│  - Step-by-Step Packet Journey Trace Slideout Drawer        │
+│  - Interactive React Flow Pipeline Topology Graph           │
+│  - Per-Thread Queue Utilization & Workload Variance Alerts  │
+│  - Dynamic Security Rules Manager (IP, Domain, App, Port)   │
+│  - SNI Intelligence & Raw Hex/ASCII Packet Dissector        │
+│  - Telemetry Replay Laboratory with Variable Playback Rate  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Quick Start
+
+#### 1. Compile the C++ DPI Engine
+```powershell
+& "C:\msys64\ucrt64\bin\g++.exe" -std=c++17 -O2 -I include -o dpi_engine.exe src/dpi_mt.cpp src/pcap_reader.cpp src/packet_parser.cpp src/sni_extractor.cpp src/types.cpp src/telemetry_collector.cpp
+```
+
+#### 2. Start the FastAPI Backend
+```powershell
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+#### 3. Start the Frontend Dev Server
+```powershell
+cd frontend
+npm run dev
+```
+
+Open `http://localhost:5173` in your browser to access the control center.
+
+---
+
 ## Summary
 
 This DPI engine demonstrates:
 
-1. **Network Protocol Parsing** - Understanding packet structure
-2. **Deep Packet Inspection** - Looking inside encrypted connections
-3. **Flow Tracking** - Managing stateful connections
-4. **Multi-threaded Architecture** - Scaling with thread pools
-5. **Producer-Consumer Pattern** - Thread-safe queues
+1. **Network Protocol Parsing** - Understanding Ethernet, IPv4, TCP, UDP packet structures
+2. **Deep Packet Inspection** - L7 TLS ClientHello SNI and HTTP Host extraction
+3. **Flow Tracking** - Managing stateful connection tables with packet journey tracing
+4. **Multi-threaded Architecture** - Scalable 2-stage pipeline with thread-safe lockless queues
+5. **Real-Time Telemetry & Control** - Full-stack WebSocket telemetry streaming and dynamic mitigation injection
 
-The key insight is that even HTTPS traffic leaks the destination domain in the TLS handshake, allowing network operators to identify and control application usage.
+Happy monitoring! 🚀
 
----
-
-## Questions?
-
-If you have questions about any part of this project, the code is well-commented and follows the same flow described in this document. Start with the simple version (`main_working.cpp`) to understand the concepts, then move to the multi-threaded version (`dpi_mt.cpp`) to see how parallelism is added.
-
-Happy learning! 🚀

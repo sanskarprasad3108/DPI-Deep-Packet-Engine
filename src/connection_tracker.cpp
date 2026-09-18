@@ -15,6 +15,7 @@ ConnectionTracker::ConnectionTracker(int fp_id, size_t max_connections)
 }
 
 Connection* ConnectionTracker::getOrCreateConnection(const FiveTuple& tuple) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = connections_.find(tuple);
     
     if (it != connections_.end()) {
@@ -40,6 +41,7 @@ Connection* ConnectionTracker::getOrCreateConnection(const FiveTuple& tuple) {
 }
 
 Connection* ConnectionTracker::getConnection(const FiveTuple& tuple) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = connections_.find(tuple);
     if (it != connections_.end()) {
         return &it->second;
@@ -56,7 +58,7 @@ Connection* ConnectionTracker::getConnection(const FiveTuple& tuple) {
 
 void ConnectionTracker::updateConnection(Connection* conn, size_t packet_size, bool is_outbound) {
     if (!conn) return;
-    
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     conn->last_seen = std::chrono::steady_clock::now();
     
     if (is_outbound) {
@@ -70,7 +72,7 @@ void ConnectionTracker::updateConnection(Connection* conn, size_t packet_size, b
 
 void ConnectionTracker::classifyConnection(Connection* conn, AppType app, const std::string& sni) {
     if (!conn) return;
-    
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (conn->state != ConnectionState::CLASSIFIED) {
         conn->app_type = app;
         conn->sni = sni;
@@ -81,13 +83,14 @@ void ConnectionTracker::classifyConnection(Connection* conn, AppType app, const 
 
 void ConnectionTracker::blockConnection(Connection* conn) {
     if (!conn) return;
-    
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     conn->state = ConnectionState::BLOCKED;
     conn->action = PacketAction::DROP;
     blocked_count_++;
 }
 
 void ConnectionTracker::closeConnection(const FiveTuple& tuple) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = connections_.find(tuple);
     if (it != connections_.end()) {
         it->second.state = ConnectionState::CLOSED;
@@ -95,6 +98,7 @@ void ConnectionTracker::closeConnection(const FiveTuple& tuple) {
 }
 
 size_t ConnectionTracker::cleanupStale(std::chrono::seconds timeout) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto now = std::chrono::steady_clock::now();
     size_t removed = 0;
     
@@ -114,6 +118,7 @@ size_t ConnectionTracker::cleanupStale(std::chrono::seconds timeout) {
 }
 
 std::vector<Connection> ConnectionTracker::getAllConnections() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<Connection> result;
     result.reserve(connections_.size());
     
@@ -125,10 +130,12 @@ std::vector<Connection> ConnectionTracker::getAllConnections() const {
 }
 
 size_t ConnectionTracker::getActiveCount() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return connections_.size();
 }
 
 ConnectionTracker::TrackerStats ConnectionTracker::getStats() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     TrackerStats stats;
     stats.active_connections = connections_.size();
     stats.total_connections_seen = total_seen_;
@@ -138,10 +145,12 @@ ConnectionTracker::TrackerStats ConnectionTracker::getStats() const {
 }
 
 void ConnectionTracker::clear() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     connections_.clear();
 }
 
 void ConnectionTracker::forEach(std::function<void(const Connection&)> callback) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (const auto& pair : connections_) {
         callback(pair.second);
     }

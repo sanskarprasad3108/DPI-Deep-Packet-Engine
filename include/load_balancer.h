@@ -53,6 +53,7 @@ public:
     
     // Get input queue (for reader to push packets)
     ThreadSafeQueue<PacketJob>& getInputQueue() { return input_queue_; }
+    size_t getQueueDepth() const { return input_queue_.size(); }
     
     // Get statistics
     struct LBStats {

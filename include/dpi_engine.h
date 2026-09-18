@@ -8,47 +8,15 @@
 #include "fast_path.h"
 #include "rule_manager.h"
 #include "connection_tracker.h"
+#include "telemetry_collector.h"
 #include <memory>
 #include <thread>
 #include <atomic>
 #include <fstream>
 #include <mutex>
+#include <vector>
 
 namespace DPI {
-
-// ============================================================================
-// DPI Engine - Main orchestrator
-// ============================================================================
-//
-// Architecture Overview:
-//
-//   +------------------+
-//   |   PCAP Reader    |  (Reads packets from input file)
-//   +--------+---------+
-//            |
-//            v (hash to select LB)
-//   +--------+----------+
-//   |   Load Balancers  |  (2 LB threads)
-//   |   LB0      LB1    |
-//   +----+--------+-----+
-//        |        |
-//        v        v (hash to select FP within LB's pool)
-//   +----+--------+-----+
-//   |  Fast Path Procs  |  (4 FP threads, 2 per LB)
-//   |  FP0 FP1  FP2 FP3 |
-//   +----+--------+-----+
-//        |        |
-//        v        v
-//   +----+--------+-----+
-//   |   Output Queue    |  (Packets to forward)
-//   +----+--------+-----+
-//        |
-//        v
-//   +----+--------+-----+
-//   |   Output Writer   |  (Writes to output PCAP)
-//   +-------------------+
-//
-// ============================================================================
 
 class DPIEngine {
 public:
@@ -59,6 +27,8 @@ public:
         size_t queue_size = 10000;
         std::string rules_file;
         bool verbose = false;
+        bool json_telemetry = false;
+        int pacing_us = 0; // Microseconds delay between packet reads (for simulated live stream)
     };
     
     DPIEngine(const Config& config);
@@ -68,8 +38,6 @@ public:
     bool initialize();
     
     // Process a PCAP file
-    // input_file: Path to input PCAP (user traffic)
-    // output_file: Path to output PCAP (forwarded traffic)
     bool processFile(const std::string& input_file, 
                      const std::string& output_file);
     
@@ -83,49 +51,30 @@ public:
     void waitForCompletion();
     
     // ========== Rule Management ==========
-    
-    // Block an IP address
     void blockIP(const std::string& ip);
-    
-    // Unblock an IP address
     void unblockIP(const std::string& ip);
     
-    // Block an application
     void blockApp(AppType app);
     void blockApp(const std::string& app_name);
-    
-    // Unblock an application
     void unblockApp(AppType app);
     void unblockApp(const std::string& app_name);
     
-    // Block a domain
     void blockDomain(const std::string& domain);
-    
-    // Unblock a domain
     void unblockDomain(const std::string& domain);
     
-    // Load rules from file
     bool loadRules(const std::string& filename);
-    
-    // Save rules to file
     bool saveRules(const std::string& filename);
     
-    // ========== Reporting ==========
-    
-    // Generate full statistics report
+    // ========== Reporting & Telemetry ==========
     std::string generateReport() const;
-    
-    // Generate classification report (app distribution)
     std::string generateClassificationReport() const;
-    
-    // Get real-time statistics
     const DPIStats& getStats() const;
-    
-    // Print live status
     void printStatus() const;
     
-    // ========== Accessors ==========
+    std::vector<ThreadTelemetry> getThreadTelemetry() const;
+    void emitLiveStats();
     
+    // ========== Accessors ==========
     RuleManager& getRuleManager() { return *rule_manager_; }
     const Config& getConfig() const { return config_; }
     bool isRunning() const { return running_; }
@@ -154,26 +103,21 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> processing_complete_{false};
     
-    // Reader thread (separate for PCAP input)
+    // Reader thread
     std::thread reader_thread_;
+    std::thread telemetry_thread_;
     
-    // Output handling
+    // Reader & output handling
     void outputThreadFunc();
     void handleOutput(const PacketJob& job, PacketAction action);
-    
-    // Write PCAP header to output file
     bool writeOutputHeader(const PacketAnalyzer::PcapGlobalHeader& header);
-    
-    // Write a packet to output file
     void writeOutputPacket(const PacketJob& job);
-    
-    // Reader function
     void readerThreadFunc(const std::string& input_file);
+    void telemetryThreadFunc();
     
-    // Convert ParsedPacket to PacketJob
     PacketJob createPacketJob(const PacketAnalyzer::RawPacket& raw,
-                               const PacketAnalyzer::ParsedPacket& parsed,
-                               uint32_t packet_id);
+                              const PacketAnalyzer::ParsedPacket& parsed,
+                              uint32_t packet_id);
 };
 
 } // namespace DPI

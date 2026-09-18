@@ -125,6 +125,8 @@ struct Connection {
     std::chrono::steady_clock::time_point last_seen;
     
     PacketAction action = PacketAction::FORWARD;
+    std::string block_reason;
+    std::vector<std::string> journey_steps;
     
     // For TCP state tracking
     bool syn_seen = false;

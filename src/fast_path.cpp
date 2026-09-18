@@ -1,9 +1,21 @@
 #include "fast_path.h"
+#include "telemetry_collector.h"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
 
 namespace DPI {
+
+// Helper: Convert uint32_t IP to string
+static std::string ipUintToString(uint32_t ip) {
+    std::ostringstream ss;
+    ss << (ip & 0xFF) << "."
+       << ((ip >> 8) & 0xFF) << "."
+       << ((ip >> 16) & 0xFF) << "."
+       << ((ip >> 24) & 0xFF);
+    return ss.str();
+}
 
 // ============================================================================
 // FastPathProcessor Implementation
@@ -47,9 +59,9 @@ void FastPathProcessor::stop() {
 }
 
 void FastPathProcessor::run() {
-    while (running_) {
+    while (running_ || !input_queue_.empty()) {
         // Get packet from input queue
-        auto job_opt = input_queue_.popWithTimeout(std::chrono::milliseconds(100));
+        auto job_opt = input_queue_.popWithTimeout(std::chrono::milliseconds(50));
         
         if (!job_opt) {
             // Periodically cleanup stale connections
@@ -77,12 +89,16 @@ void FastPathProcessor::run() {
 }
 
 PacketAction FastPathProcessor::processPacket(PacketJob& job) {
+    std::lock_guard<std::recursive_mutex> lock(conn_tracker_.getMutex());
+    
     // Get or create connection
     Connection* conn = conn_tracker_.getOrCreateConnection(job.tuple);
     if (!conn) {
         // Should not happen, but handle gracefully
         return PacketAction::FORWARD;
     }
+    
+    bool is_first_packet = (conn->packets_in + conn->packets_out == 0);
     
     // Update connection stats
     bool is_outbound = true;  // In this model, all packets from user are outbound
@@ -95,6 +111,32 @@ PacketAction FastPathProcessor::processPacket(PacketJob& job) {
     
     // If connection is already blocked, drop immediately
     if (conn->state == ConnectionState::BLOCKED) {
+        if (std::find(conn->journey_steps.begin(), conn->journey_steps.end(), "Subsequent Packets Dropped") == conn->journey_steps.end()) {
+            conn->journey_steps.push_back("Subsequent Packets Dropped");
+        }
+        
+        // Emit flow update periodically on block
+        if (conn->packets_in + conn->packets_out <= 5 || (conn->packets_in + conn->packets_out) % 10 == 0) {
+            FlowTelemetryEvent ev;
+            ev.flow_id = job.tuple.toString();
+            ev.src_ip = ipUintToString(job.tuple.src_ip);
+            ev.dst_ip = ipUintToString(job.tuple.dst_ip);
+            ev.src_port = job.tuple.src_port;
+            ev.dst_port = job.tuple.dst_port;
+            ev.protocol = (job.tuple.protocol == 6 ? "TCP" : (job.tuple.protocol == 17 ? "UDP" : "OTHER"));
+            ev.sni = conn->sni;
+            ev.application = appTypeToString(conn->app_type);
+            ev.packets = conn->packets_in + conn->packets_out;
+            ev.bytes = conn->bytes_in + conn->bytes_out;
+            ev.status = "BLOCKED";
+            ev.block_reason = conn->block_reason;
+            ev.fast_path_id = fp_id_;
+            ev.created_at_ms = TelemetryCollector::getCurrentTimeMs();
+            ev.last_seen_ms = TelemetryCollector::getCurrentTimeMs();
+            ev.journey_steps = conn->journey_steps;
+            TelemetryCollector::getInstance().emitFlowUpdated(ev);
+        }
+        
         return PacketAction::DROP;
     }
     
@@ -104,7 +146,31 @@ PacketAction FastPathProcessor::processPacket(PacketJob& job) {
     }
     
     // Check rules (even for classified connections, as rules might change)
-    return checkRules(job, conn);
+    PacketAction action = checkRules(job, conn);
+    
+    // Emit telemetry for new / classified / blocked flows
+    if (is_first_packet || conn->state == ConnectionState::CLASSIFIED || action == PacketAction::DROP) {
+        FlowTelemetryEvent ev;
+        ev.flow_id = job.tuple.toString();
+        ev.src_ip = ipUintToString(job.tuple.src_ip);
+        ev.dst_ip = ipUintToString(job.tuple.dst_ip);
+        ev.src_port = job.tuple.src_port;
+        ev.dst_port = job.tuple.dst_port;
+        ev.protocol = (job.tuple.protocol == 6 ? "TCP" : (job.tuple.protocol == 17 ? "UDP" : "OTHER"));
+        ev.sni = conn->sni;
+        ev.application = appTypeToString(conn->app_type);
+        ev.packets = conn->packets_in + conn->packets_out;
+        ev.bytes = conn->bytes_in + conn->bytes_out;
+        ev.status = (action == PacketAction::DROP ? "BLOCKED" : "FORWARDED");
+        ev.block_reason = conn->block_reason;
+        ev.fast_path_id = fp_id_;
+        ev.created_at_ms = TelemetryCollector::getCurrentTimeMs();
+        ev.last_seen_ms = TelemetryCollector::getCurrentTimeMs();
+        ev.journey_steps = conn->journey_steps;
+        TelemetryCollector::getInstance().emitFlowUpdated(ev);
+    }
+    
+    return action;
 }
 
 void FastPathProcessor::inspectPayload(PacketJob& job, Connection* conn) {
@@ -129,6 +195,7 @@ void FastPathProcessor::inspectPayload(PacketJob& job, Connection* conn) {
         auto domain = DNSExtractor::extractQuery(payload, job.payload_length);
         if (domain) {
             conn_tracker_.classifyConnection(conn, AppType::DNS, *domain);
+            conn->journey_steps.push_back("DNS Query: " + *domain);
             return;
         }
     }
@@ -136,8 +203,10 @@ void FastPathProcessor::inspectPayload(PacketJob& job, Connection* conn) {
     // Basic port-based classification as fallback
     if (job.tuple.dst_port == 80) {
         conn_tracker_.classifyConnection(conn, AppType::HTTP, "");
+        conn->journey_steps.push_back("Port 80 HTTP");
     } else if (job.tuple.dst_port == 443) {
         conn_tracker_.classifyConnection(conn, AppType::HTTPS, "");
+        conn->journey_steps.push_back("Port 443 HTTPS");
     }
 }
 
@@ -159,6 +228,10 @@ bool FastPathProcessor::tryExtractSNI(const PacketJob& job, Connection* conn) {
         // Map SNI to app type
         AppType app = sniToAppType(*sni);
         conn_tracker_.classifyConnection(conn, app, *sni);
+        
+        conn->journey_steps.push_back("Client Hello: TLS Handshake");
+        conn->journey_steps.push_back("SNI Detected: " + *sni);
+        conn->journey_steps.push_back("Application Classified: " + appTypeToString(app));
         
         if (app != AppType::UNKNOWN && app != AppType::HTTPS) {
             classification_hits_++;
@@ -185,6 +258,10 @@ bool FastPathProcessor::tryExtractHTTPHost(const PacketJob& job, Connection* con
     if (host) {
         AppType app = sniToAppType(*host);
         conn_tracker_.classifyConnection(conn, app, *host);
+        
+        conn->journey_steps.push_back("HTTP Request: Host Header");
+        conn->journey_steps.push_back("Host Detected: " + *host);
+        conn->journey_steps.push_back("Application Classified: " + appTypeToString(app));
         
         if (app != AppType::UNKNOWN && app != AppType::HTTP) {
             classification_hits_++;
@@ -213,31 +290,44 @@ PacketAction FastPathProcessor::checkRules(const PacketJob& job, Connection* con
     );
     
     if (block_reason) {
-        // Log the block
-        std::ostringstream ss;
-        ss << "[FP" << fp_id_ << "] BLOCKED packet: ";
-        
+        std::string detail_str;
         switch (block_reason->type) {
             case RuleManager::BlockReason::IP:
-                ss << "IP " << block_reason->detail;
+                detail_str = "IP " + block_reason->detail;
                 break;
             case RuleManager::BlockReason::APP:
-                ss << "App " << block_reason->detail;
+                detail_str = "App " + block_reason->detail;
                 break;
             case RuleManager::BlockReason::DOMAIN:
-                ss << "Domain " << block_reason->detail;
+                detail_str = "Domain " + block_reason->detail;
                 break;
             case RuleManager::BlockReason::PORT:
-                ss << "Port " << block_reason->detail;
+                detail_str = "Port " + block_reason->detail;
                 break;
         }
         
-        std::cout << ss.str() << std::endl;
+        conn->block_reason = detail_str;
+        conn->journey_steps.push_back("Rule Match: " + detail_str + " (BLOCKED)");
+        
+        std::cout << "[FP" << fp_id_ << "] BLOCKED packet: " << detail_str << std::endl;
         
         // Mark connection as blocked
         conn_tracker_.blockConnection(conn);
         
+        TelemetryCollector::getInstance().emitSecurityEvent(
+            "RULE_MATCHED", detail_str,
+            ipUintToString(job.tuple.src_ip),
+            ipUintToString(job.tuple.dst_ip),
+            appTypeToString(conn->app_type),
+            conn->sni,
+            fp_id_
+        );
+        
         return PacketAction::DROP;
+    }
+    
+    if (conn->journey_steps.empty() || conn->journey_steps.back() != "Forwarded") {
+        conn->journey_steps.push_back("Forwarded");
     }
     
     return PacketAction::FORWARD;
@@ -252,23 +342,28 @@ void FastPathProcessor::updateTCPState(Connection* conn, uint8_t tcp_flags) {
     if (tcp_flags & SYN) {
         if (tcp_flags & ACK) {
             conn->syn_ack_seen = true;
+            conn->journey_steps.push_back("SYN-ACK: Connection Handshake");
         } else {
             conn->syn_seen = true;
+            conn->journey_steps.push_back("SYN: Connection Initiated");
         }
     }
     
     if (conn->syn_seen && conn->syn_ack_seen && (tcp_flags & ACK)) {
         if (conn->state == ConnectionState::NEW) {
             conn->state = ConnectionState::ESTABLISHED;
+            conn->journey_steps.push_back("ESTABLISHED: Handshake Complete");
         }
     }
     
     if (tcp_flags & FIN) {
         conn->fin_seen = true;
+        conn->journey_steps.push_back("FIN: Connection Teardown");
     }
     
     if (tcp_flags & RST) {
         conn->state = ConnectionState::CLOSED;
+        conn->journey_steps.push_back("RST: Connection Reset");
     }
     
     if (conn->fin_seen && (tcp_flags & ACK)) {
