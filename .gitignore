@@ -1,0 +1,12 @@
+# Native and Python build output
+build/
+*.exe
+__pycache__/
+*.py[cod]
+
+# Generated capture output
+test_out.pcap
+
+# Local environment files
+.env
+.venv/

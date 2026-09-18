@@ -35,9 +35,10 @@ export function useTelemetry() {
   const reconnectTimeoutRef = useRef<any>(null);
 
   const connectWebSocket = useCallback(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/ws/telemetry`;
+    const configuredApiUrl = import.meta.env.VITE_API_URL;
+    const apiUrl = configuredApiUrl ? new URL(configuredApiUrl) : window.location;
+    const protocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${apiUrl.host}/ws/telemetry`;
 
     try {
       const ws = new WebSocket(wsUrl);

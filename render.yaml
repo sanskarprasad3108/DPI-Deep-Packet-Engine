@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: dpi-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: DPI_ENGINE_PATH
+        value: /app/build/dpi_engine
+
+  - type: web
+    name: dpi-frontend
+    runtime: static
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: frontend/dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://dpi-api.onrender.com
