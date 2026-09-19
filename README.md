@@ -8,7 +8,30 @@ The repository includes a `render.yaml` Blueprint for the API and frontend.
 2. Render creates `dpi-api` (Docker + FastAPI + native DPI engine) and `dpi-frontend` (static Vite site).
 3. If the API service name is changed, update `VITE_API_URL` on `dpi-frontend` to the API service's HTTPS URL, then redeploy the frontend.
 
-The API health endpoint is `/api/health`. The frontend uses the same API URL for REST requests and its telemetry WebSocket.
+The API provides multi-protocol health check endpoints (`/api/health`, `/healthz`, `/ping`, `/api/health/detailed`, `/api/uptime`) compatible with cloud providers (Render, AWS, Fly.io, Kubernetes) and external monitoring services like UptimeRobot. The frontend also includes a dedicated **Health & Uptime** monitor with live latency graphs and automated UptimeRobot provisioning.
+
+### Health Check Endpoints & Monitoring
+
+| Endpoint | Method | Purpose | Response |
+|----------|--------|---------|----------|
+| `/api/health` | `GET`, `HEAD` | Cloud / Render primary health probe | Status, uptime, engine state |
+| `/healthz` | `GET`, `HEAD` | Kubernetes & load balancer liveness | Lightweight status JSON |
+| `/ping` | `GET`, `HEAD` | Ultra-fast liveness ping | Fast 200 OK |
+| `/api/health/detailed` | `GET` | System diagnostics (CPU, RAM, Disk, Engine) | Full hardware & telemetry metrics |
+| `/api/uptime` | `GET` | Historical uptime % & latency probe timeline | 24h, 7d, 30d availability ratios |
+| `/api/uptimerobot/status` | `GET` | Live external status from UptimeRobot API v2 | Configured monitors & alerts |
+| `/api/uptimerobot/setup` | `POST` | Automated monitor creation wizard | Provisioned monitor details |
+
+### Setting Up UptimeRobot (Free 24/7 Monitoring & Keep-Alive)
+
+1. **Get your free API Key**: Register at [UptimeRobot](https://uptimerobot.com) and copy your API Key from *Settings → API Settings*.
+2. **Via UI**: In the DPI-X Web Dashboard, navigate to **Health & Uptime** (`/health`), paste your API key, target URL (`https://your-dpi-api.onrender.com/api/health`), and click **CREATE UPTIMEROBOT MONITOR**.
+3. **Via CLI Script**:
+   ```bash
+   python scripts/setup_uptimerobot.py --api-key <YOUR_API_KEY> --url https://your-dpi-api.onrender.com/api/health
+   ```
+4. **Keep-Alive Worker**: Enable the built-in keep-alive pinger from the UI or API (`POST /api/uptimerobot/keepalive`) to prevent free cloud dynos from idling.
+
 
 
 This document explains **everything** about this project - from basic networking concepts to the complete code architecture. After reading this, you should understand exactly how packets flow through the system without needing to read the code.

@@ -1,4 +1,4 @@
-import { DPIRule, DPIStats, FlowItem, PCAPFile, SecurityEvent, ThreadStat, TrafficPoint } from '../types';
+import { DetailedHealth, DPIRule, DPIStats, FlowItem, PCAPFile, SecurityEvent, ThreadStat, TrafficPoint, UptimeRobotMonitor, UptimeStats } from '../types';
 
 const API_BASE = `${(import.meta.env.VITE_API_URL || '').replace(/\/$/, '')}/api`;
 
@@ -117,6 +117,40 @@ export const api = {
     return res.json();
   },
 
+  async getDetailedHealth(): Promise<DetailedHealth> {
+    const res = await fetch(`${API_BASE}/health/detailed`);
+    return res.json();
+  },
+
+  async getUptime(): Promise<UptimeStats> {
+    const res = await fetch(`${API_BASE}/uptime`);
+    return res.json();
+  },
+
+  async getUptimeRobotStatus(apiKey?: string): Promise<{ configured: boolean; status: string; monitors: UptimeRobotMonitor[]; error?: string }> {
+    const url = apiKey ? `${API_BASE}/uptimerobot/status?api_key=${encodeURIComponent(apiKey)}` : `${API_BASE}/uptimerobot/status`;
+    const res = await fetch(url);
+    return res.json();
+  },
+
+  async setupUptimeRobot(data: { api_key: string; friendly_name?: string; url: string; interval?: number }) {
+    const res = await fetch(`${API_BASE}/uptimerobot/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return res.json();
+  },
+
+  async configureKeepAlive(data: { url: string; interval_sec?: number; enabled: boolean }) {
+    const res = await fetch(`${API_BASE}/uptimerobot/keepalive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return res.json();
+  },
+
   async getPcaps(): Promise<PCAPFile[]> {
     const res = await fetch(`${API_BASE}/pcap/list`);
     return res.json();
@@ -132,3 +166,4 @@ export const api = {
     return res.json();
   }
 };
+

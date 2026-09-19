@@ -8,7 +8,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from datetime import datetime, timezone
 from .engine_manager import engine_manager, WORKSPACE_ROOT
+from .uptime_tracker import uptime_tracker
+from .uptime_robot import UptimeRobotClient, get_uptime_robot_client
 
 FRONTEND_DIST = os.path.join(WORKSPACE_ROOT, "frontend", "dist")
 
@@ -28,6 +31,22 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def on_startup():
+    # Start self-monitoring health probe task
+    uptime_tracker.probe_task = asyncio.create_task(uptime_tracker.start_self_probe(engine_manager))
+    # Start keep-alive worker if configured
+    uptime_tracker.keep_alive_task = asyncio.create_task(uptime_tracker.start_keep_alive_worker())
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    if uptime_tracker.probe_task:
+        uptime_tracker.probe_task.cancel()
+    if uptime_tracker.keep_alive_task:
+        uptime_tracker.keep_alive_task.cancel()
+
+
 class StartEngineRequest(BaseModel):
     pcap_file: Optional[str] = None
     lb_threads: Optional[int] = 2
@@ -45,7 +64,21 @@ class ReplayRequest(BaseModel):
     speed: Optional[float] = 1.0
 
 
+class UptimeRobotSetupRequest(BaseModel):
+    api_key: str
+    friendly_name: Optional[str] = "DPI Packet Engine Health"
+    url: str
+    interval: Optional[int] = 300  # seconds (5 min)
+
+
+class KeepAliveConfigRequest(BaseModel):
+    url: str
+    interval_sec: Optional[int] = 300
+    enabled: bool = True
+
+
 @app.get("/")
+@app.head("/")
 async def root():
     index_file = os.path.join(FRONTEND_DIST, "index.html")
     if os.path.exists(index_file):
@@ -56,19 +89,149 @@ async def root():
         "version": "2.0.0",
         "docs_url": "/docs",
         "health_check": "/api/health",
+        "detailed_health": "/api/health/detailed",
+        "uptime": "/api/uptime",
         "engine_status": "/api/engine/status"
     }
 
 
+# Quick Liveness & Readiness checks for Load Balancers, Kubernetes, Render, AWS, and Uptime Monitors
+@app.get("/health")
+@app.head("/health")
+@app.get("/healthz")
+@app.head("/healthz")
+@app.get("/ping")
+@app.head("/ping")
 @app.get("/api/health")
+@app.head("/api/health")
 async def health_check():
+    """Lightweight 200 OK health check endpoint for UptimeRobot, Render, and cloud orchestrators."""
     return {
         "status": "healthy",
         "service": "dpi-backend",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds": round(uptime_tracker.uptime_seconds, 1),
         "engine_running": engine_manager.is_running,
         "is_replaying": engine_manager.is_replaying,
         "recorded_events_count": len(engine_manager.recorded_events),
     }
+
+
+@app.get("/api/health/detailed")
+async def detailed_health_check():
+    """Comprehensive system, engine, worker, and resource diagnostics."""
+    sys_metrics = uptime_tracker.get_system_metrics()
+    uptime_stats = uptime_tracker.calculate_uptime_stats()
+
+    # Determine status
+    is_healthy = True
+    warnings = []
+    if sys_metrics.get("memory", {}).get("used_percent", 0) > 92.0:
+        warnings.append("High memory utilization")
+    if engine_manager.stats.get("drop_rate_pct", 0) > 50.0:
+        warnings.append("High packet drop rate")
+
+    status_str = "healthy" if not warnings else "degraded"
+
+    return {
+        "status": status_str,
+        "service": "dpi-backend",
+        "version": "2.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime": {
+            "seconds": uptime_stats["uptime_seconds"],
+            "human": uptime_stats["uptime_human"],
+            "availability_24h": uptime_stats["availability_pct_24h"],
+            "availability_7d": uptime_stats["availability_pct_7d"],
+            "availability_30d": uptime_stats["availability_pct_30d"],
+        },
+        "engine": {
+            "running": engine_manager.is_running,
+            "replaying": engine_manager.is_replaying,
+            "current_pcap": os.path.basename(engine_manager.current_pcap),
+            "lb_threads": engine_manager.lb_threads,
+            "fp_threads": engine_manager.fp_threads,
+            "total_packets": engine_manager.stats.get("total_packets", 0),
+            "current_pps": engine_manager.stats.get("current_pps", 0.0),
+            "drop_rate_pct": engine_manager.stats.get("drop_rate_pct", 0.0),
+            "active_flows": len(engine_manager.flows),
+        },
+        "system": sys_metrics,
+        "telemetry": {
+            "active_subscribers": len(engine_manager.subscribers),
+            "traffic_points_recorded": len(engine_manager.traffic_history),
+            "security_events_count": len(engine_manager.security_events),
+        },
+        "warnings": warnings,
+    }
+
+
+@app.get("/api/uptime")
+async def get_uptime():
+    """Returns uptime metrics, latency probes history, and operational incidents."""
+    return uptime_tracker.calculate_uptime_stats()
+
+
+@app.get("/api/uptimerobot/status")
+async def get_uptimerobot_status(api_key: Optional[str] = Query(default=None)):
+    """Fetch live monitor statuses from UptimeRobot API."""
+    client = get_uptime_robot_client(api_key)
+    res = client.get_monitors()
+    if res.get("stat") != "ok":
+        return {
+            "configured": bool(client.api_key),
+            "status": "error",
+            "error": res.get("error", {}).get("message", "UptimeRobot API query failed"),
+            "monitors": []
+        }
+    
+    return {
+        "configured": True,
+        "status": "ok",
+        "monitors": res.get("monitors", [])
+    }
+
+
+@app.post("/api/uptimerobot/setup")
+async def setup_uptimerobot(req: UptimeRobotSetupRequest):
+    """Setup a new UptimeRobot monitor for this deployment."""
+    if not req.api_key.strip():
+        raise HTTPException(status_code=400, detail="UptimeRobot API key is required.")
+    if not req.url.strip():
+        raise HTTPException(status_code=400, detail="Target health check URL is required.")
+
+    client = UptimeRobotClient(api_key=req.api_key)
+    res = client.new_monitor(
+        friendly_name=req.friendly_name or "DPI Packet Engine Health",
+        url=req.url,
+        interval_seconds=req.interval or 300,
+        http_method=1,  # HEAD
+    )
+
+    if res.get("stat") != "ok":
+        raise HTTPException(status_code=400, detail=res.get("error", {}).get("message", "Failed to create monitor"))
+
+    return {
+        "status": "success",
+        "monitor": res.get("monitor", {})
+    }
+
+
+@app.post("/api/uptimerobot/keepalive")
+async def configure_keepalive(req: KeepAliveConfigRequest):
+    """Configure or toggle background keep-alive ping for free cloud hosting."""
+    if req.enabled and req.url:
+        uptime_tracker.keep_alive_url = req.url
+        uptime_tracker.keep_alive_interval_sec = max(60, req.interval_sec or 300)
+        return {
+            "status": "active",
+            "target_url": uptime_tracker.keep_alive_url,
+            "interval_sec": uptime_tracker.keep_alive_interval_sec
+        }
+    else:
+        uptime_tracker.keep_alive_url = None
+        return {"status": "disabled"}
+
 
 
 @app.get("/api/engine/status")
@@ -352,8 +515,9 @@ if os.path.exists(FRONTEND_DIST):
 
 
 @app.get("/{full_path:path}")
+@app.head("/{full_path:path}")
 async def serve_frontend_spa(full_path: str):
-    if full_path.startswith(("api", "ws", "docs", "redoc", "openapi.json")):
+    if full_path.startswith(("api", "ws", "docs", "redoc", "openapi.json", "health", "healthz", "ping")):
         raise HTTPException(status_code=404, detail="Not Found")
 
     file_path = os.path.join(FRONTEND_DIST, full_path)

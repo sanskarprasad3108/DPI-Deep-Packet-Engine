@@ -12,6 +12,7 @@ import { RulesView } from './components/RulesView';
 import { DomainsView } from './components/DomainsView';
 import { PacketInspectorView } from './components/PacketInspectorView';
 import { ReplayView } from './components/ReplayView';
+import { HealthStatusView } from './components/HealthStatusView';
 import { JourneyDrawer } from './components/JourneyDrawer';
 import { FlowItem } from './types';
 import './App.css';
@@ -256,6 +257,13 @@ export function App() {
                 rules={rules}
                 onAddRule={handleAddRule}
                 onDeleteRule={handleDeleteRule}
+              />
+            )}
+
+            {currentTab === 'health' && (
+              <HealthStatusView
+                engineRunning={engineStatus === 'RUNNING'}
+                activeSubscribers={isConnected ? 1 : 0}
               />
             )}
 

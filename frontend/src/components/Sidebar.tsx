@@ -8,6 +8,8 @@ import {
   Globe, 
   Binary, 
   History,
+  Activity,
+  HeartPulse,
   Radio,
   Server
 } from 'lucide-react';
@@ -20,7 +22,8 @@ export type TabType =
   | 'rules' 
   | 'domains' 
   | 'packets' 
-  | 'replay';
+  | 'replay'
+  | 'health';
 
 interface SidebarProps {
   currentTab: TabType;
@@ -73,6 +76,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: Shield,
       badge: rulesCount > 0 ? `${rulesCount} RULES` : null,
       badgeColor: 'bg-indigo-950 text-indigo-400 border-indigo-800',
+    },
+    {
+      id: 'health' as TabType,
+      label: 'Health & Uptime',
+      icon: HeartPulse,
+      badge: '99.9%',
+      badgeColor: 'bg-emerald-950 text-emerald-300 border-emerald-800',
     },
     {
       id: 'domains' as TabType,

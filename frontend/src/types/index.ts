@@ -116,3 +116,103 @@ export interface TelemetryWebSocketMessage {
   is_running?: boolean;
   is_replaying?: boolean;
 }
+
+export interface HealthProbe {
+  timestamp: string;
+  status: 'UP' | 'DEGRADED' | 'DOWN';
+  latency_ms: number;
+  components?: Record<string, any>;
+  error?: string | null;
+}
+
+export interface OperationalIncident {
+  id: number;
+  timestamp: string;
+  severity: 'CRITICAL' | 'WARNING' | 'INFO';
+  type: string;
+  message: string;
+  resolved: boolean;
+}
+
+export interface UptimeStats {
+  status: 'OPERATIONAL' | 'DEGRADED' | 'OUTAGE';
+  uptime_seconds: number;
+  uptime_human: string;
+  availability_pct_24h: number;
+  availability_pct_7d: number;
+  availability_pct_30d: number;
+  total_checks: number;
+  successful_checks: number;
+  failed_checks: number;
+  latency: {
+    avg_ms: number;
+    min_ms: number;
+    max_ms: number;
+    recent_history: HealthProbe[];
+  };
+  incidents: OperationalIncident[];
+}
+
+export interface DetailedHealth {
+  status: 'healthy' | 'degraded' | 'unhealthy';
+  service: string;
+  version: string;
+  timestamp: string;
+  uptime: {
+    seconds: number;
+    human: string;
+    availability_24h: number;
+    availability_7d: number;
+    availability_30d: number;
+  };
+  engine: {
+    running: boolean;
+    replaying: boolean;
+    current_pcap: string;
+    lb_threads: number;
+    fp_threads: number;
+    total_packets: number;
+    current_pps: number;
+    drop_rate_pct: number;
+    active_flows: number;
+  };
+  system: {
+    platform: string;
+    python_version: string;
+    os_name: string;
+    cpu_count: number;
+    process_pid: number;
+    disk: {
+      total_gb: number;
+      used_gb: number;
+      free_gb: number;
+      used_percent: number;
+    };
+    memory: {
+      total_mb: number;
+      available_mb: number;
+      used_percent: number;
+      process_rss_mb: number;
+    };
+    cpu_percent: number;
+    process_cpu_percent: number;
+  };
+  telemetry: {
+    active_subscribers: number;
+    traffic_points_recorded: number;
+    security_events_count: number;
+  };
+  warnings: string[];
+}
+
+export interface UptimeRobotMonitor {
+  id: number;
+  friendly_name: string;
+  url: string;
+  type: number;
+  status: number; // 0: paused, 1: not checked, 2: up, 8: seems down, 9: down
+  interval: number;
+  custom_uptime_ratio?: string;
+  response_times?: Array<{ datetime: number; value: number }>;
+}
+
